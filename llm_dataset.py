@@ -24,12 +24,13 @@ from peft import (
     PeftModel
 )
 import sys
-model_name, model_type, num_samples = sys.argv[1], sys.argv[2], int(sys.argv[3])
-print("Training samples: ", num_samples)
+#model_name, model_type, num_samples = sys.argv[1], sys.argv[2], int(sys.argv[3])
+#print("Training samples: ", num_samples)
 #model_name = "HuggingFaceH4/zephyr-7b-beta"
 #model_type = "zephyr_fine_tune"
-#model_type = "llama_fine_tune"
-#model_name = "./models--meta-llama--Llama-2-7b-chat-hf/snapshots/c1b0db933684edbfe29a06fa47eb19cc48025e93"
+model_type = "llama_fine_tune"
+model_name = "./models--meta-llama--Llama-2-7b-chat-hf/snapshots/c1b0db933684edbfe29a06fa47eb19cc48025e93"
+num_samples = 10000
 tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir="./")
 def make_simple_prompt(sample):
     
@@ -93,7 +94,7 @@ def preprocess_dataset(tokenizer: AutoTokenizer, max_length: int, dataset: str, 
 
 
 
-max_length = 4096
+max_length = 1024
 def gen_sample_kp():
     #os.system("rm -rf ./hf_data/*")
     for i, line in enumerate(jsonlines.open("./data/kp20k_train_llm.jsonl")):

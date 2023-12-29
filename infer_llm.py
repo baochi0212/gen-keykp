@@ -121,8 +121,8 @@ def vllm_generate(llm, chats):
 
 for dataset in ["inspec", "krapivin", "nus", "semeval"]:
 # for dataset in ["inspec"]:
-    present_writer = open(f"./llm_results/output_{model_type}/{model_type}_{dataset}_pre.txt", "a")
-    abs_writer = open(f"./llm_results/output_{model_type}/{model_type}_{dataset}_abs.txt", "a")
+    present_writer = open(f"./llm_results/output_{model_type}/{model_type}_{dataset}_pre.txt", "w")
+    abs_writer = open(f"./llm_results/output_{model_type}/{model_type}_{dataset}_abs.txt", "w")
     passed_line = len(open(f"./llm_results/output_{model_type}/{model_type}_{dataset}_pre.txt", "r").readlines())
     print("Passed", passed_line)
     documents = []

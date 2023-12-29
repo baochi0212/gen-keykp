@@ -1,19 +1,21 @@
 import os
-
+print("Debug torch: ", os.environ["TORCH_DISTRIBUTED_DEBUG"])
+#modules = find_all_linear_names(model)
 from glob import glob
 from copy import deepcopy
 from random import randrange
 from functools import partial
-from trl import SFTTrainer
+#from trl import SFTTrainer
 
 import torch
 from accelerate import Accelerator
 import bitsandbytes as bnb
 from trainer import CustomTrainer, CustomArgs
-
+from dataclasses import dataclass, field
 from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
+    LlamaForCausalLM, 
     AutoTokenizer,
     BitsAndBytesConfig,
     TrainingArguments,
@@ -22,9 +24,21 @@ from transformers import (
 )
 from peft import (
     LoraConfig,
-    prepare_model_for_kbit_training,
+    #prepare_model_for_kbit_training,
     get_peft_model,
     PeftModel
+)
+from transformers import (
+    CONFIG_MAPPING,
+    AutoConfig,
+    BitsAndBytesConfig,
+    LlamaForCausalLM,
+    LlamaTokenizer,
+    AutoTokenizer,
+    HfArgumentParser,
+    Trainer,
+    TrainingArguments,
+    set_seed,
 )
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 # torch.cuda.set_device(2)
@@ -44,17 +58,67 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.float16,
 )
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    quantization_config=bnb_config,
-    cache_dir="./",
-    device_map={'': 0},
-    # device_map="auto"
-)
+#model = AutoModelForCausalLM.from_pretrained(
+#    model_name,
+#    quantization_config=bnb_config,
+#    cache_dir="./",
+#    device_map = {"":int(os.environ.get("LOCAL_RANK") or 0)}
+#    #device_map={'': 0},
+#    # device_map="auto"
+#)
+def prepare_model_for_kbit_training(model, use_gradient_checkpointing=True):
+    r"""
+    This method wraps the entire protocol for preparing a model before running a training. This includes:
+        1- Cast the layernorm in fp32 2- making output embedding layer require grads 3- Add the upcasting of the lm
+        head to fp32
 
+    Args:
+        model, (`transformers.PreTrainedModel`):
+            The loaded model from `transformers`
+    """
+    loaded_in_kbit = getattr(model, "is_loaded_in_8bit", False) or getattr(model, "is_loaded_in_4bit", False)
+    print("Load in kbit is ", loaded_in_kbit)
 
+    for name, param in model.named_parameters():
+        # freeze base model's layers
+        param.requires_grad = False
+
+    # cast all non INT8/INT4 parameters to fp32
+    for param in model.parameters():
+        if ((param.dtype == torch.float16) or (param.dtype == torch.bfloat16)) and loaded_in_kbit:
+            param.data = param.data.to(torch.float32)
+
+    for name, module in model.named_modules():
+        if 'norm' in name:
+            module = module.to(torch.float32)
+
+    if loaded_in_kbit and use_gradient_checkpointing:
+        # For backward compatibility
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        else:
+            def make_inputs_require_grad(module, _input, output):
+                output.requires_grad_(True)
+
+            model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+        # enable gradient checkpointing for memory efficiency
+        model.gradient_checkpointing_enable()
+
+    return model
+model = LlamaForCausalLM.from_pretrained(
+        model_name,
+        cache_dir="./",
+        revision="main",
+        #use_auth_token=True if model_args.use_auth_token else None,
+        torch_dtype=torch.float16, 
+        low_cpu_mem_usage=True,
+        device_map={"":int(os.environ.get("LOCAL_RANK") or 0)},
+        load_in_4bit=True,
+        quantization_config=bnb_config,
+        #torch_dtype="float16"
+    )
 model.config.use_cache = False
-model.gradient_checkpointing_enable()
+#model.gradient_checkpointing_enable()
 model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
 
 
@@ -84,18 +148,24 @@ peft_config = LoraConfig(
     lora_dropout=lora_dropout,
     target_modules=modules,
     r=lora_r,
-    bias="none",
+    inference_mode=False,
     task_type="CAUSAL_LM"
 )
-
-
+#peft_config = LoraConfig(
+#                task_type="CAUSAL_LM",
+#                target_modules=target_modules,
+#                inference_mode=False,
+#                r=lora_rank, lora_alpha=lora_alpha,
+#                lora_dropout=lora_dropout,
+#                modules_to_save=modules_to_save)
+#
 model = get_peft_model(model, peft_config)
 training_args = CustomArgs(
     model_type=model_type,
     model_name=model_name,
     output_dir=f"outputs_{model_type}",
     output_merged_dir=f"lora_{model_type}",
-    per_device_train_batch_size=8,
+    per_device_train_batch_size=4,
     gradient_accumulation_steps=1,
     learning_rate=1e-4,
     max_grad_norm=1.0,  
@@ -104,18 +174,36 @@ training_args = CustomArgs(
     warmup_steps=50,
     fp16=True,
     logging_strategy="steps",
-    logging_steps=300,
+    logging_steps=50,
     save_strategy="steps",
-    save_steps=9000,
+    save_steps=6000,
+    #max_steps=600,
     #evaluation_strategy="epoch",
     #per_device_eval_batch_size=8,
     optim="paged_adamw_8bit",
     num_train_epochs=3, 
     # report_to="wandb"
-    report_to="tensorboard"
+    report_to="tensorboard",
+    ddp_find_unused_parameters=False
 )
-
-
+#@dataclass
+#class MyTrainingArguments(TrainingArguments):
+#    trainable : Optional[str] = field(default="q_proj,v_proj")
+#    lora_rank : Optional[int] = field(default=8)
+#    lora_dropout : Optional[float] = field(default=0.1)
+#    lora_alpha : Optional[float] = field(default=32.)
+#    modules_to_save : Optional[str] = field(default=None)
+#    peft_path : Optional[str] = field(default=None)
+#    use_flash_attention_2 : Optional[bool] = field(default=False)
+#    double_quant: Optional[bool] = field(default=True)
+#    quant_type: Optional[str] = field(default="nf4")
+#    load_in_kbits: Optional[int] = field(default=16)
+#    full_finetuning : Optional[bool] = field(default=False)
+#    output_merged_dir: Optional[str] = field(default=None)
+#    optim: Optional[str] = field(default="paged_adamw_8
+#
+#parser = HfArgumentParser((ModelArguments, DataTrainingArguments, MyTrainingArguments))
+#training_args = parser.parse_args_into_dataclasses()
 trainer = CustomTrainer(
     model=model,
     args=training_args,
@@ -146,11 +234,9 @@ def test(type, path):
 #train
 trainer.train()  # Now we just run train()!
 #eval
-for eval_path in glob(f"./lora_{model_type}*"):
-    print("Evaluating checkpoint: ", eval_path)
-    #eval(model_type, eval_path)
-    test(model_type, eval_path)
-
+#for eval_path in glob(f"./lora_{model_type}*"):
+#    print("Evaluating checkpoint: ", eval_path)
+#    #eval(model_type, eval_path)
+#    test(model_type, eval_path)
+#
 #print("Args checkig", training_args.model_type, training_args.model_name)
-
-
